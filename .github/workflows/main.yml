@@ -3,6 +3,11 @@ name: Build Android APK
 
 on:
   workflow_dispatch:
+    inputs:
+      app_url:
+        description: 'Rails CMMS URL opened by the Android APK'
+        required: false
+        default: 'http://10.0.2.2:3000/'
   push:
     branches:
       - main
@@ -29,21 +34,202 @@ jobs:
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
 
+      - name: Accept Android licenses and install SDK packages
+        shell: bash
+        run: |
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager "platform-tools" "platforms;android-35" "build-tools;35.0.0"
+
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.7'
 
+      - name: Find or generate Android project
+        id: android_project
+        shell: bash
+        env:
+          INPUT_APP_URL: ${{ github.event.inputs.app_url }}
+        run: |
+          set -e
+          PROJECT_DIR=""
+
+          for f in \
+            ./settings.gradle \
+            ./settings.gradle.kts \
+            ./android/settings.gradle \
+            ./android/settings.gradle.kts \
+            ./CMMS-master/android/settings.gradle \
+            ./CMMS-master/android/settings.gradle.kts \
+            ./CMMS2/android/settings.gradle \
+            ./CMMS2/android/settings.gradle.kts
+          do
+            if [ -f "$f" ]; then
+              PROJECT_DIR="$(dirname "$f")"
+              break
+            fi
+          done
+
+          if [ -z "$PROJECT_DIR" ]; then
+            echo "No Android folder found. Creating a temporary Android WebView project for this build."
+            PROJECT_DIR="generated-android"
+            APP_URL="${INPUT_APP_URL:-http://10.0.2.2:3000/}"
+
+            mkdir -p "$PROJECT_DIR/app/src/main/java/com/alhadi/cmms"
+            mkdir -p "$PROJECT_DIR/app/src/main/res/values"
+
+            cat > "$PROJECT_DIR/settings.gradle" <<'EOF'
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+          dependencyResolutionManagement { repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS); repositories { google(); mavenCentral() } }
+          rootProject.name = 'GeneratedCMMSAndroid'
+          include ':app'
+          EOF
+
+            cat > "$PROJECT_DIR/build.gradle" <<'EOF'
+          plugins {
+              id 'com.android.application' version '8.6.1' apply false
+          }
+          EOF
+
+            cat > "$PROJECT_DIR/app/build.gradle" <<'EOF'
+          plugins { id 'com.android.application' }
+
+          android {
+              namespace 'com.alhadi.cmms'
+              compileSdk 35
+
+              defaultConfig {
+                  applicationId 'com.alhadi.cmms'
+                  minSdk 23
+                  targetSdk 35
+                  versionCode 1
+                  versionName '1.0'
+              }
+          }
+          EOF
+
+            cat > "$PROJECT_DIR/app/src/main/res/values/strings.xml" <<'EOF'
+          <resources>
+              <string name="app_name">CMMS</string>
+          </resources>
+          EOF
+
+            cat > "$PROJECT_DIR/app/src/main/res/values/styles.xml" <<'EOF'
+          <resources>
+              <style name="AppTheme" parent="android:style/Theme.Material.Light.NoActionBar">
+                  <item name="android:windowActionBar">false</item>
+                  <item name="android:windowNoTitle">true</item>
+              </style>
+          </resources>
+          EOF
+
+            cat > "$PROJECT_DIR/app/src/main/AndroidManifest.xml" <<'EOF'
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <uses-permission android:name="android.permission.INTERNET" />
+
+              <application
+                  android:allowBackup="true"
+                  android:label="CMMS"
+                  android:theme="@style/AppTheme"
+                  android:usesCleartextTraffic="true">
+
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+              </application>
+          </manifest>
+          EOF
+
+            cat > "$PROJECT_DIR/app/src/main/java/com/alhadi/cmms/MainActivity.java" <<EOF
+          package com.alhadi.cmms;
+
+          import android.annotation.SuppressLint;
+          import android.app.Activity;
+          import android.os.Bundle;
+          import android.webkit.WebSettings;
+          import android.webkit.WebView;
+          import android.webkit.WebViewClient;
+          import android.webkit.WebResourceRequest;
+          import android.webkit.WebResourceError;
+
+          public class MainActivity extends Activity {
+              private WebView webView;
+              private static final String APP_URL = "$APP_URL";
+
+              @SuppressLint("SetJavaScriptEnabled")
+              @Override
+              protected void onCreate(Bundle savedInstanceState) {
+                  super.onCreate(savedInstanceState);
+                  webView = new WebView(this);
+                  setContentView(webView);
+
+                  WebSettings settings = webView.getSettings();
+                  settings.setJavaScriptEnabled(true);
+                  settings.setDomStorageEnabled(true);
+                  settings.setDatabaseEnabled(true);
+                  settings.setLoadWithOverviewMode(true);
+                  settings.setUseWideViewPort(true);
+
+                  webView.setWebViewClient(new WebViewClient() {
+                      @Override
+                      public void onReceivedError(WebView view, WebResourceRequest request, WebResourceError error) {
+                          super.onReceivedError(view, request, error);
+                          if (request.isForMainFrame()) {
+                              view.loadData("<html><body style='font-family:sans-serif;padding:20px'><h2>CMMS server not reachable</h2><p>APK was built successfully, but the app cannot open:</p><p>" + APP_URL + "</p><p>Start your Rails server or change the app_url input in GitHub Actions.</p></body></html>", "text/html", "UTF-8");
+                          }
+                      }
+                  });
+
+                  webView.loadUrl(APP_URL);
+              }
+
+              @Override
+              public void onBackPressed() {
+                  if (webView != null && webView.canGoBack()) {
+                      webView.goBack();
+                  } else {
+                      super.onBackPressed();
+                  }
+              }
+          }
+          EOF
+          fi
+
+          PROJECT_DIR="${PROJECT_DIR#./}"
+          echo "project_dir=$PROJECT_DIR" >> "$GITHUB_OUTPUT"
+          echo "Android project directory: $PROJECT_DIR"
+          find "$PROJECT_DIR" -maxdepth 3 -type f | sort
+
       - name: Build debug APK
-        working-directory: android
-        run: gradle assembleDebug --stacktrace
+        working-directory: ${{ steps.android_project.outputs.project_dir }}
+        shell: bash
+        run: |
+          if [ -f ./gradlew ]; then
+            chmod +x ./gradlew
+            ./gradlew assembleDebug --stacktrace
+          else
+            gradle assembleDebug --stacktrace
+          fi
 
       - name: Show APK output
-        run: ls -lah android/app/build/outputs/apk/debug/
+        shell: bash
+        run: |
+          find "${{ steps.android_project.outputs.project_dir }}" -type f -name '*.apk' -print -exec ls -lh {} \;
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
           name: CMMS-debug-apk
-          path: android/app/build/outputs/apk/debug/*.apk
+          path: ${{ steps.android_project.outputs.project_dir }}/**/*.apk
           if-no-files-found: error
