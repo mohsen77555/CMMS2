@@ -1,0 +1,607 @@
+name: Build Offline Internal APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - master
+
+permissions:
+  contents: read
+
+jobs:
+  build-offline-apk:
+    name: Build offline APK
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK packages
+        shell: bash
+        run: |
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager "platform-tools" "platforms;android-35" "build-tools;35.0.0"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.7'
+
+      - name: Generate offline Android project
+        shell: bash
+        run: |
+          set -euo pipefail
+          PROJECT_DIR=generated-offline-android
+          rm -rf "$PROJECT_DIR" apk-output
+          mkdir -p "$PROJECT_DIR" apk-output
+          cat > "$PROJECT_DIR/settings.gradle" <<'CMMS_EOF_settings_gradle'
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+          rootProject.name = 'CMMSOfflineAndroid'
+          include ':app'
+          CMMS_EOF_settings_gradle
+          cat > "$PROJECT_DIR/build.gradle" <<'CMMS_EOF_build_gradle'
+          plugins {
+              id 'com.android.application' version '8.6.1' apply false
+          }
+          CMMS_EOF_build_gradle
+          mkdir -p "$PROJECT_DIR/app"
+          cat > "$PROJECT_DIR/app/build.gradle" <<'CMMS_EOF_app_build_gradle'
+          plugins {
+              id 'com.android.application'
+          }
+          
+          android {
+              namespace 'com.alhadi.cmms.offline'
+              compileSdk 35
+          
+              defaultConfig {
+                  applicationId 'com.alhadi.cmms.offline'
+                  minSdk 23
+                  targetSdk 35
+                  versionCode 1
+                  versionName '1.0-offline'
+              }
+          }
+          CMMS_EOF_app_build_gradle
+          mkdir -p "$PROJECT_DIR/app/src/main"
+          cat > "$PROJECT_DIR/app/src/main/AndroidManifest.xml" <<'CMMS_EOF_app_src_main_AndroidManifest_xml'
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <!-- No INTERNET permission: this APK is internal/offline only. -->
+              <application
+                  android:allowBackup="true"
+                  android:label="Alhadi CMMS Offline"
+                  android:theme="@style/AppTheme"
+                  android:usesCleartextTraffic="false">
+                  <activity
+                      android:name=".MainActivity"
+                      android:configChanges="orientation|screenSize|keyboardHidden"
+                      android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+              </application>
+          </manifest>
+          CMMS_EOF_app_src_main_AndroidManifest_xml
+          mkdir -p "$PROJECT_DIR/app/src/main/res/values"
+          cat > "$PROJECT_DIR/app/src/main/res/values/strings.xml" <<'CMMS_EOF_app_src_main_res_values_strings_xml'
+          <resources>
+              <string name="app_name">Alhadi CMMS Offline</string>
+          </resources>
+          CMMS_EOF_app_src_main_res_values_strings_xml
+          mkdir -p "$PROJECT_DIR/app/src/main/res/values"
+          cat > "$PROJECT_DIR/app/src/main/res/values/styles.xml" <<'CMMS_EOF_app_src_main_res_values_styles_xml'
+          <resources>
+              <style name="AppTheme" parent="android:style/Theme.Material.Light.NoActionBar">
+                  <item name="android:fontFamily">sans</item>
+                  <item name="android:windowNoTitle">true</item>
+                  <item name="android:windowActionBar">false</item>
+                  <item name="android:windowLightStatusBar">false</item>
+                  <item name="android:statusBarColor">#101827</item>
+                  <item name="android:navigationBarColor">#101827</item>
+              </style>
+          </resources>
+          CMMS_EOF_app_src_main_res_values_styles_xml
+          mkdir -p "$PROJECT_DIR/app/src/main/java/com/alhadi/cmms/offline"
+          cat > "$PROJECT_DIR/app/src/main/java/com/alhadi/cmms/offline/MainActivity.java" <<'CMMS_EOF_app_src_main_java_com_alhadi_cmms_offline_MainActivity_java'
+          package com.alhadi.cmms.offline;
+          
+          import android.annotation.SuppressLint;
+          import android.app.Activity;
+          import android.content.Intent;
+          import android.content.SharedPreferences;
+          import android.os.Bundle;
+          import android.view.View;
+          import android.webkit.JavascriptInterface;
+          import android.webkit.WebSettings;
+          import android.webkit.WebView;
+          import android.widget.Toast;
+          
+          public class MainActivity extends Activity {
+              private WebView webView;
+              private SharedPreferences prefs;
+          
+              @SuppressLint({"SetJavaScriptEnabled", "AddJavascriptInterface"})
+              @Override
+              protected void onCreate(Bundle savedInstanceState) {
+                  super.onCreate(savedInstanceState);
+                  prefs = getSharedPreferences("cmms_offline_store", MODE_PRIVATE);
+          
+                  webView = new WebView(this);
+                  webView.setScrollBarStyle(View.SCROLLBARS_INSIDE_OVERLAY);
+                  setContentView(webView);
+          
+                  WebSettings s = webView.getSettings();
+                  s.setJavaScriptEnabled(true);
+                  s.setDomStorageEnabled(true);
+                  s.setDatabaseEnabled(true);
+                  s.setAllowFileAccess(true);
+                  s.setAllowContentAccess(true);
+                  s.setLoadWithOverviewMode(true);
+                  s.setUseWideViewPort(true);
+                  s.setBuiltInZoomControls(false);
+                  s.setDisplayZoomControls(false);
+                  s.setMediaPlaybackRequiresUserGesture(false);
+          
+                  webView.addJavascriptInterface(new CMMSBridge(), "CMMSBridge");
+                  webView.loadUrl("file:///android_asset/www/index.html");
+              }
+          
+              @Override
+              public void onBackPressed() {
+                  if (webView != null && webView.canGoBack()) {
+                      webView.goBack();
+                  } else {
+                      super.onBackPressed();
+                  }
+              }
+          
+              public class CMMSBridge {
+                  @JavascriptInterface
+                  public String loadData() {
+                      return prefs.getString("cmms_data_json", "");
+                  }
+          
+                  @JavascriptInterface
+                  public void saveData(String json) {
+                      prefs.edit().putString("cmms_data_json", json == null ? "" : json).apply();
+                  }
+          
+                  @JavascriptInterface
+                  public void toast(final String message) {
+                      runOnUiThread(() -> Toast.makeText(MainActivity.this, message, Toast.LENGTH_SHORT).show());
+                  }
+          
+                  @JavascriptInterface
+                  public void shareBackup(final String json) {
+                      runOnUiThread(() -> {
+                          Intent sendIntent = new Intent(Intent.ACTION_SEND);
+                          sendIntent.setType("application/json");
+                          sendIntent.putExtra(Intent.EXTRA_SUBJECT, "CMMS Offline Backup");
+                          sendIntent.putExtra(Intent.EXTRA_TEXT, json == null ? "" : json);
+                          startActivity(Intent.createChooser(sendIntent, "Share CMMS backup"));
+                      });
+                  }
+              }
+          }
+          CMMS_EOF_app_src_main_java_com_alhadi_cmms_offline_MainActivity_java
+          mkdir -p "$PROJECT_DIR/app/src/main/assets/www"
+          cat > "$PROJECT_DIR/app/src/main/assets/www/index.html" <<'CMMS_EOF_app_src_main_assets_www_index_html'
+          <!doctype html>
+          <html lang="ar" dir="rtl">
+          <head>
+            <meta charset="utf-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+            <meta name="theme-color" content="#101827">
+            <title>Alhadi CMMS Offline</title>
+            <link rel="stylesheet" href="styles.css">
+          </head>
+          <body>
+            <div id="login" class="login-screen">
+              <div class="login-card">
+                <div class="brand-mark">CMMS</div>
+                <h1>Alhadi CMMS Offline</h1>
+                <p>نسخة داخلية تعمل بدون إنترنت وبدون سيرفر.</p>
+                <label>رمز الدخول المحلي</label>
+                <input id="pinInput" type="password" inputmode="numeric" placeholder="الرمز الافتراضي 1234">
+                <button id="loginBtn" class="primary full">دخول</button>
+                <small>البيانات محفوظة داخل هذا الجهاز فقط. غيّر الرمز من الإعدادات.</small>
+              </div>
+            </div>
+          
+            <div id="app" class="app hidden">
+              <header class="topbar">
+                <button id="menuBtn" class="icon-btn" aria-label="menu">☰</button>
+                <div class="title-block">
+                  <strong>Alhadi CMMS Offline</strong>
+                  <span>داخلي فقط • لا يحتاج إنترنت • لا يحتاج Rails server</span>
+                </div>
+                <button id="quickAddBtn" class="ghost">+ أمر عمل</button>
+              </header>
+          
+              <aside id="sidebar" class="sidebar">
+                <nav id="nav"></nav>
+                <div class="side-footer">
+                  <span id="syncState">Offline</span>
+                  <small>Local DB v1</small>
+                </div>
+              </aside>
+          
+              <main id="main" class="main"></main>
+            </div>
+          
+            <div id="modal" class="modal hidden" role="dialog" aria-modal="true">
+              <div class="modal-card">
+                <div class="modal-head">
+                  <h2 id="modalTitle"></h2>
+                  <button id="modalClose" class="icon-btn">×</button>
+                </div>
+                <div id="modalBody" class="modal-body"></div>
+              </div>
+            </div>
+          
+            <script src="app.js"></script>
+          </body>
+          </html>
+          CMMS_EOF_app_src_main_assets_www_index_html
+          mkdir -p "$PROJECT_DIR/app/src/main/assets/www"
+          cat > "$PROJECT_DIR/app/src/main/assets/www/styles.css" <<'CMMS_EOF_app_src_main_assets_www_styles_css'
+          :root{
+            --bg:#f4f7fb;--panel:#ffffff;--ink:#111827;--muted:#667085;--line:#e5e7eb;--brand:#0f766e;--brand2:#115e59;--danger:#dc2626;--warn:#d97706;--ok:#16a34a;--blue:#2563eb;--dark:#101827;--shadow:0 8px 24px rgba(15,23,42,.10);--radius:18px;
+          }
+          *{box-sizing:border-box}html,body{height:100%}body{margin:0;font-family:system-ui,-apple-system,"Segoe UI",Tahoma,Arial,sans-serif;background:var(--bg);color:var(--ink);direction:rtl}.hidden{display:none!important}
+          button,input,select,textarea{font:inherit}button{border:0;border-radius:12px;padding:10px 14px;cursor:pointer;background:#e5e7eb;color:var(--ink)}button.primary{background:var(--brand);color:white}button.primary:hover{background:var(--brand2)}button.danger{background:#fee2e2;color:#991b1b}button.warn{background:#fef3c7;color:#92400e}button.ghost{background:rgba(255,255,255,.12);color:white;border:1px solid rgba(255,255,255,.25)}button.small{padding:7px 9px;border-radius:10px;font-size:13px}.icon-btn{width:42px;height:42px;padding:0;display:inline-flex;align-items:center;justify-content:center;font-size:22px;background:transparent;color:inherit}.full{width:100%}
+          input,select,textarea{width:100%;border:1px solid var(--line);border-radius:12px;background:white;padding:11px 12px;color:var(--ink);outline:none}textarea{min-height:90px;resize:vertical}label{display:block;font-size:13px;color:var(--muted);margin:10px 0 6px}.login-screen{min-height:100vh;display:grid;place-items:center;background:linear-gradient(145deg,#0f172a,#0f766e);padding:20px}.login-card{width:min(430px,100%);background:white;border-radius:26px;box-shadow:var(--shadow);padding:28px}.brand-mark{width:70px;height:70px;border-radius:20px;background:#0f766e;color:white;display:grid;place-items:center;font-weight:800;margin-bottom:14px}.login-card h1{margin:0 0 8px;font-size:26px}.login-card p{margin:0 0 18px;color:var(--muted)}.login-card small{display:block;color:var(--muted);margin-top:14px;line-height:1.7}
+          .app{min-height:100vh}.topbar{height:70px;background:var(--dark);color:white;display:flex;align-items:center;gap:12px;padding:10px 16px;position:fixed;top:0;right:0;left:0;z-index:20;box-shadow:0 2px 12px rgba(0,0,0,.15)}.title-block{display:flex;flex-direction:column;gap:2px;line-height:1.2;flex:1}.title-block span{font-size:12px;color:#cbd5e1}.sidebar{position:fixed;top:70px;bottom:0;right:0;width:270px;background:#fff;border-left:1px solid var(--line);z-index:15;display:flex;flex-direction:column;transition:.2s}.sidebar nav{padding:12px}.nav-btn{width:100%;text-align:right;margin:4px 0;background:transparent;color:#334155;border-radius:13px;display:flex;gap:10px;align-items:center;justify-content:flex-start}.nav-btn.active{background:#ccfbf1;color:#115e59;font-weight:700}.nav-ico{font-size:19px;width:24px}.side-footer{margin-top:auto;border-top:1px solid var(--line);padding:14px;color:var(--muted);display:flex;justify-content:space-between;align-items:center}.side-footer span{color:#16a34a;font-weight:800}.main{padding:92px 292px 28px 22px}.page-head{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:16px}.page-head h1{margin:0;font-size:26px}.page-actions{display:flex;gap:8px;flex-wrap:wrap}.grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:14px}.grid.two{grid-template-columns:repeat(2,minmax(0,1fr))}.grid.three{grid-template-columns:repeat(3,minmax(0,1fr))}.card{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);box-shadow:var(--shadow);padding:16px}.metric{display:flex;flex-direction:column;gap:8px}.metric span{color:var(--muted);font-size:13px}.metric strong{font-size:30px}.metric.ok strong{color:var(--ok)}.metric.warn strong{color:var(--warn)}.metric.danger strong{color:var(--danger)}.table-card{overflow:hidden;padding:0}.table-tools{display:flex;gap:8px;align-items:center;padding:12px;border-bottom:1px solid var(--line);background:#fafafa}.table-tools input{max-width:340px}table{width:100%;border-collapse:collapse;background:white}th,td{padding:12px;border-bottom:1px solid var(--line);vertical-align:top;text-align:right;font-size:14px}th{background:#f8fafc;color:#475569;font-size:12px;text-transform:uppercase;letter-spacing:.02em}tr:last-child td{border-bottom:0}.badge{display:inline-flex;align-items:center;gap:5px;padding:4px 9px;border-radius:999px;background:#e2e8f0;color:#334155;font-size:12px;font-weight:700}.badge.ok{background:#dcfce7;color:#166534}.badge.warn{background:#fef3c7;color:#92400e}.badge.danger{background:#fee2e2;color:#991b1b}.badge.blue{background:#dbeafe;color:#1d4ed8}.badge.dark{background:#e5e7eb;color:#111827}.actions{display:flex;gap:6px;flex-wrap:wrap}.list{display:flex;flex-direction:column;gap:10px}.item{border:1px solid var(--line);border-radius:14px;padding:12px;background:white}.item strong{display:block}.item small{color:var(--muted)}.alert{border-radius:14px;padding:12px;background:#fff7ed;border:1px solid #fed7aa;color:#9a3412}.alert.danger{background:#fef2f2;border-color:#fecaca;color:#991b1b}.alert.ok{background:#f0fdf4;border-color:#bbf7d0;color:#166534}.form-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px 12px}.form-grid .span{grid-column:1/-1}.modal{position:fixed;inset:0;background:rgba(15,23,42,.55);z-index:50;display:grid;place-items:center;padding:18px}.modal-card{width:min(840px,100%);max-height:92vh;overflow:auto;background:white;border-radius:24px;box-shadow:0 20px 70px rgba(0,0,0,.3)}.modal-head{position:sticky;top:0;background:white;border-bottom:1px solid var(--line);display:flex;align-items:center;justify-content:space-between;padding:14px 18px;z-index:1}.modal-head h2{margin:0;font-size:21px}.modal-body{padding:18px}.empty{padding:28px;text-align:center;color:var(--muted)}.kpi-row{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}.backup-box{height:240px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;direction:ltr;text-align:left}.print-area{background:white}.ltr{direction:ltr;text-align:left}.muted{color:var(--muted)}.mt{margin-top:16px}.nowrap{white-space:nowrap}
+          @media(max-width:900px){.grid,.grid.two,.grid.three{grid-template-columns:1fr}.sidebar{transform:translateX(100%);width:82vw}.sidebar.open{transform:translateX(0)}.main{padding:90px 14px 24px}.topbar{height:72px}.title-block strong{font-size:15px}.title-block span{display:none}.quick-hide{display:none}.page-head{align-items:flex-start;flex-direction:column}.form-grid{grid-template-columns:1fr}table{min-width:760px}.table-card{overflow:auto}.table-tools{position:sticky;right:0;min-width:760px}.modal-card{border-radius:18px}.grid.mobile-two{grid-template-columns:repeat(2,minmax(0,1fr))}}
+          @media print{.topbar,.sidebar,.page-actions,.table-tools,.actions,.login-screen{display:none!important}.main{padding:0}.card{box-shadow:none;border:0}.table-card{overflow:visible}body{background:white}}
+          CMMS_EOF_app_src_main_assets_www_styles_css
+          mkdir -p "$PROJECT_DIR/app/src/main/assets/www"
+          cat > "$PROJECT_DIR/app/src/main/assets/www/app.js" <<'CMMS_EOF_app_src_main_assets_www_app_js'
+          /* Alhadi CMMS Offline - local first, no server */
+          const VERSION = '1.0-offline';
+          let currentPage = 'dashboard';
+          let data = null;
+          let unlocked = false;
+          const $ = (s, root=document) => root.querySelector(s);
+          const $$ = (s, root=document) => Array.from(root.querySelectorAll(s));
+          const nowISO = () => new Date().toISOString();
+          const today = () => new Date().toISOString().slice(0,10);
+          const uid = (p='id') => p + '_' + Math.random().toString(36).slice(2,8) + Date.now().toString(36).slice(-4);
+          const arDate = (v) => v ? new Date(v).toLocaleDateString('ar-YE') : '-';
+          const num = (v) => Number(v || 0);
+          const money = (v) => num(v).toLocaleString('en-US',{maximumFractionDigits:2});
+          const esc = (v) => String(v ?? '').replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
+          const toast = (m) => { try{ if(window.CMMSBridge){ CMMSBridge.toast(m); return; } }catch(e){} alert(m); };
+          
+          const NAV = [
+            ['dashboard','📊','لوحة التحكم'],['assets','🏭','الأصول'],['requests','📝','طلبات الصيانة'],['workorders','🧰','أوامر العمل'],['pm','⏱️','الصيانة الوقائية'],['inventory','📦','المخزون'],['reports','📈','التقارير'],['backup','💾','نسخ احتياطي'],['settings','⚙️','الإعدادات']
+          ];
+          const ASSET_GROUPS = ['Bucket Elevators','Chain Conveyors','Screw Conveyors','Silo Fans','Silo Gates','Sensors','Rollermills','Plansifters','Purifiers','Compressors','Packing Machines','Scales','Other'];
+          const STATUS = ['Running','Stopped','Under Maintenance','Standby'];
+          const PRIORITY = ['Low','Medium','High','Critical'];
+          const WO_STATUS = ['Draft','Released','In Progress','Waiting Parts','Completed','Closed','Cancelled'];
+          
+          function defaultData(){
+            return {
+              meta:{version:VERSION, createdAt:nowISO(), updatedAt:nowISO()},
+              settings:{pin:'1234', company:'Alhadi Group', plant:'Internal CMMS', language:'ar'},
+              assets:[
+                {id:uid('ast'), code:'ELA-01', name:'Bucket Elevator ELA-01', group:'Bucket Elevators', location:'Silo Intake', status:'Running', priority:'High', meter:485, dueMeter:500, warrantyUntil:'2026-12-31', notes:'Active warranty: review before internal repair cost.'},
+                {id:uid('ast'), code:'ELA-02', name:'Bucket Elevator ELA-02', group:'Bucket Elevators', location:'Cleaning Line', status:'Running', priority:'Medium', meter:310, dueMeter:500, warrantyUntil:'', notes:''},
+                {id:uid('ast'), code:'ELA-03', name:'Bucket Elevator ELA-03', group:'Bucket Elevators', location:'Mill Feed', status:'Running', priority:'Medium', meter:420, dueMeter:500, warrantyUntil:'', notes:''},
+                {id:uid('ast'), code:'FN-01', name:'Silo Fan FN-01', group:'Silo Fans', location:'Silo 1', status:'Running', priority:'High', meter:485, dueMeter:500, warrantyUntil:'2027-01-15', notes:'PM due after 15 running hours.'},
+                {id:uid('ast'), code:'RM-01', name:'Rollermill RM-01', group:'Rollermills', location:'Mill Floor', status:'Running', priority:'Critical', meter:0, dueMeter:0, warrantyUntil:'', notes:''}
+              ],
+              requests:[
+                {id:uid('wr'), no:'WR-0001', assetCode:'ELA-01', requestedBy:'Operator', priority:'High', status:'Open', description:'Operator noticed abnormal sound in ELA-01.', createdAt:nowISO(), linkedWo:''}
+              ],
+              workorders:[
+                {id:uid('wo'), no:'WO-0001', title:'Repair Gearbox ELA-01', assetCode:'ELA-01', type:'Corrective', status:'Released', priority:'High', assignedTo:'Mechanical Technician', plannedDate:today(), laborHours:0, materialCost:0, notes:'Warranty alert: this asset is under active warranty. Review warranty before issuing internal repair cost.', parts:[], createdAt:nowISO(), closedAt:''}
+              ],
+              pm:[
+                {id:uid('pm'), code:'PM-ELV-MONTHLY', name:'Monthly Elevator Inspection', assetCode:'ELA-01', frequency:'Monthly', meterDue:500, steps:'Safety isolation\nOpen guard\nClean bearing area\nApply grease\nCheck temperature\nTrial run\nRecord result', active:true},
+                {id:uid('pm'), code:'PM-FAN-HOURS', name:'Running Hours Fan PM', assetCode:'FN-01', frequency:'Meter 500h', meterDue:500, steps:'Inspect vibration\nClean inlet\nCheck bearing temperature\nCheck bolts\nTrial run', active:true}
+              ],
+              inventory:[
+                {id:uid('inv'), code:'GRS-001', name:'Bearing Grease', type:'Lubricant', uom:'kg', stock:25, min:10, cost:8, critical:true, notes:'Used for bearing lubrication standard operation.'},
+                {id:uid('inv'), code:'BRG-6205', name:'Bearing 6205', type:'Spare Part', uom:'pcs', stock:6, min:4, cost:12, critical:true, notes:''},
+                {id:uid('inv'), code:'CLN-001', name:'Cleaning Tools', type:'Consumable', uom:'set', stock:3, min:2, cost:20, critical:false, notes:''}
+              ],
+              transactions:[]
+            };
+          }
+          
+          function bridgeLoad(){
+            try{ if(window.CMMSBridge){ return CMMSBridge.loadData(); } }catch(e){}
+            try{ return localStorage.getItem('cmms_offline_data') || ''; }catch(e){ return ''; }
+          }
+          function bridgeSave(json){
+            try{ if(window.CMMSBridge){ CMMSBridge.saveData(json); return; } }catch(e){}
+            try{ localStorage.setItem('cmms_offline_data', json); }catch(e){}
+          }
+          function loadData(){
+            const raw = bridgeLoad();
+            if(raw){
+              try{ data = JSON.parse(raw); normalizeData(); return; }catch(e){ console.error(e); }
+            }
+            data = defaultData(); saveData();
+          }
+          function normalizeData(){
+            const d = defaultData();
+            for(const k of Object.keys(d)){ if(data[k] === undefined) data[k] = d[k]; }
+            if(!data.settings) data.settings = d.settings;
+            if(!data.settings.pin) data.settings.pin = '1234';
+          }
+          function saveData(){ data.meta.updatedAt = nowISO(); bridgeSave(JSON.stringify(data)); }
+          
+          function init(){
+            loadData();
+            $('#loginBtn').addEventListener('click', login);
+            $('#pinInput').addEventListener('keydown', e => { if(e.key === 'Enter') login(); });
+            $('#menuBtn').addEventListener('click', () => $('#sidebar').classList.toggle('open'));
+            $('#modalClose').addEventListener('click', closeModal);
+            $('#modal').addEventListener('click', e => { if(e.target.id === 'modal') closeModal(); });
+            $('#quickAddBtn').addEventListener('click', () => openWorkorderForm());
+            renderNav();
+          }
+          function login(){
+            const pin = $('#pinInput').value.trim();
+            if(pin === data.settings.pin){
+              unlocked = true; $('#login').classList.add('hidden'); $('#app').classList.remove('hidden'); render();
+            } else { toast('رمز الدخول غير صحيح'); }
+          }
+          function renderNav(){
+            $('#nav').innerHTML = NAV.map(([id,ico,label]) => `<button class="nav-btn ${id===currentPage?'active':''}" data-page="${id}"><span class="nav-ico">${ico}</span><span>${label}</span></button>`).join('');
+            $$('.nav-btn').forEach(b => b.addEventListener('click', () => { currentPage = b.dataset.page; $('#sidebar').classList.remove('open'); render(); }));
+          }
+          function setPage(id){ currentPage=id; render(); }
+          function page(title, actions, body){
+            $('#main').innerHTML = `<div class="page-head"><h1>${title}</h1><div class="page-actions">${actions||''}</div></div>${body}`;
+            renderNav();
+          }
+          function render(){
+            if(!unlocked) return;
+            const fn = {dashboard:renderDashboard, assets:renderAssets, requests:renderRequests, workorders:renderWorkorders, pm:renderPM, inventory:renderInventory, reports:renderReports, backup:renderBackup, settings:renderSettings}[currentPage] || renderDashboard;
+            fn();
+          }
+          function badge(v, kind='dark'){ return `<span class="badge ${kind}">${esc(v)}</span>`; }
+          function priorityBadge(v){ return badge(v, v==='Critical'?'danger':v==='High'?'warn':v==='Medium'?'blue':'dark'); }
+          function statusBadge(v){ return badge(v, ['Running','Completed','Closed'].includes(v)?'ok':(['Stopped','Cancelled'].includes(v)?'danger':(['Waiting Parts','Under Maintenance'].includes(v)?'warn':'blue'))); }
+          function assetByCode(code){ return data.assets.find(a => a.code === code); }
+          function invById(id){ return data.inventory.find(i => i.id === id); }
+          function woById(id){ return data.workorders.find(w => w.id === id); }
+          function nextNo(prefix, arr, field='no'){
+            let max = 0; arr.forEach(x => { const m = String(x[field]||'').match(/(\d+)$/); if(m) max = Math.max(max, Number(m[1])); });
+            return `${prefix}-${String(max+1).padStart(4,'0')}`;
+          }
+          
+          function renderDashboard(){
+            const openWO = data.workorders.filter(w => !['Closed','Cancelled'].includes(w.status)).length;
+            const lowStock = data.inventory.filter(i => num(i.stock) <= num(i.min)).length;
+            const duePM = data.assets.filter(a => num(a.dueMeter)>0 && num(a.meter)>=num(a.dueMeter)-20).length;
+            const warranty = data.assets.filter(a => a.warrantyUntil && new Date(a.warrantyUntil) >= new Date()).length;
+            const recentWO = [...data.workorders].slice(-5).reverse();
+            const alerts = [];
+            data.assets.forEach(a => {
+              if(num(a.dueMeter)>0 && num(a.meter)>=num(a.dueMeter)) alerts.push(`الصيانة مستحقة للأصل ${a.code} حسب العداد.`);
+              else if(num(a.dueMeter)>0 && num(a.dueMeter)-num(a.meter)<=20) alerts.push(`الصيانة قريبة للأصل ${a.code}: باقي ${num(a.dueMeter)-num(a.meter)} ساعة.`);
+              if(a.warrantyUntil && new Date(a.warrantyUntil)>=new Date()) alerts.push(`الأصل ${a.code} تحت الضمان حتى ${a.warrantyUntil}.`);
+            });
+            page('لوحة التحكم', `<button class="primary" onclick="openWorkorderForm()">+ أمر عمل</button><button onclick="setPage('backup')">نسخ احتياطي</button>`, `
+              <div class="grid mobile-two">
+                <div class="card metric"><span>الأصول</span><strong>${data.assets.length}</strong></div>
+                <div class="card metric warn"><span>أوامر مفتوحة</span><strong>${openWO}</strong></div>
+                <div class="card metric danger"><span>مخزون منخفض</span><strong>${lowStock}</strong></div>
+                <div class="card metric ok"><span>أصول تحت الضمان</span><strong>${warranty}</strong></div>
+              </div>
+              <div class="grid two mt">
+                <div class="card"><h3>التنبيهات</h3><div class="list">${alerts.length?alerts.slice(0,8).map(a=>`<div class="alert">${esc(a)}</div>`).join(''):'<div class="alert ok">لا توجد تنبيهات حرجة الآن.</div>'}</div></div>
+                <div class="card"><h3>آخر أوامر العمل</h3><div class="list">${recentWO.map(w=>`<div class="item"><strong>${esc(w.no)} - ${esc(w.title)}</strong><small>${esc(w.assetCode)} • ${esc(w.status)} • ${arDate(w.createdAt)}</small></div>`).join('') || '<div class="empty">لا توجد أوامر</div>'}</div></div>
+              </div>
+              <div class="card mt"><h3>حوكمة مفعّلة داخل النسخة الأوفلاين</h3><div class="grid two"><div class="alert ok">لا صرف مواد إلا على أمر عمل.</div><div class="alert ok">تحديث المخزون يتم فقط عبر حركة مخزنية.</div><div class="alert ok">تنبيه ضمان الأصل قبل تكلفة الإصلاح.</div><div class="alert ok">تنبيه الصيانة الوقائية حسب العداد.</div></div></div>
+            `);
+          }
+          
+          function renderTable(title, rows, headers, rowFn, addBtn){
+            return `<div class="card table-card"><div class="table-tools"><input placeholder="بحث..." oninput="filterTable(this)">${addBtn||''}</div><table><thead><tr>${headers.map(h=>`<th>${h}</th>`).join('')}</tr></thead><tbody>${rows.length?rows.map(rowFn).join(''):`<tr><td colspan="${headers.length}" class="empty">لا توجد بيانات</td></tr>`}</tbody></table></div>`;
+          }
+          function filterTable(input){
+            const q = input.value.toLowerCase();
+            const table = input.closest('.table-card').querySelector('tbody');
+            $$('tr', table).forEach(tr => tr.style.display = tr.textContent.toLowerCase().includes(q) ? '' : 'none');
+          }
+          
+          function renderAssets(){
+            page('الأصول', `<button class="primary" onclick="openAssetForm()">+ أصل</button>`, renderTable('assets', data.assets, ['الكود','الاسم','المجموعة','الموقع','الحالة','العداد','الضمان','إجراء'], a => `
+              <tr><td class="ltr nowrap"><strong>${esc(a.code)}</strong></td><td>${esc(a.name)}</td><td>${esc(a.group)}</td><td>${esc(a.location)}</td><td>${statusBadge(a.status)} ${priorityBadge(a.priority)}</td><td class="ltr">${esc(a.meter||0)} / ${esc(a.dueMeter||0)}</td><td>${a.warrantyUntil?badge(a.warrantyUntil,'ok'):'-'}</td><td class="actions"><button class="small" onclick="openAssetForm('${a.id}')">تعديل</button><button class="small warn" onclick="createWOForAsset('${a.code}')">أمر عمل</button><button class="small danger" onclick="deleteRecord('assets','${a.id}')">حذف</button></td></tr>`));
+          }
+          function openAssetForm(id){
+            const a = id ? data.assets.find(x=>x.id===id) : {id:'',code:'',name:'',group:'Bucket Elevators',location:'',status:'Running',priority:'Medium',meter:0,dueMeter:0,warrantyUntil:'',notes:''};
+            openForm(id?'تعديل أصل':'إضافة أصل', [
+              ['code','كود الأصل','text',a.code,true],['name','اسم الأصل','text',a.name,true],['group','المجموعة','select',a.group,false,ASSET_GROUPS],['location','الموقع','text',a.location],['status','الحالة','select',a.status,false,STATUS],['priority','الأولوية','select',a.priority,false,PRIORITY],['meter','قراءة العداد','number',a.meter],['dueMeter','استحقاق العداد','number',a.dueMeter],['warrantyUntil','نهاية الضمان','date',a.warrantyUntil],['notes','ملاحظات','textarea',a.notes]
+            ], vals => {
+              vals.meter = num(vals.meter); vals.dueMeter = num(vals.dueMeter);
+              if(id) Object.assign(a, vals); else data.assets.push({...vals,id:uid('ast')}); saveData(); closeModal(); renderAssets();
+            });
+          }
+          function deleteRecord(collection,id){ if(confirm('هل تريد الحذف؟')){ data[collection]=data[collection].filter(x=>x.id!==id); saveData(); render(); } }
+          
+          function renderRequests(){
+            page('طلبات الصيانة', `<button class="primary" onclick="openRequestForm()">+ طلب صيانة</button>`, renderTable('requests', data.requests, ['رقم الطلب','الأصل','الوصف','الأولوية','الحالة','التاريخ','إجراء'], r => `
+              <tr><td class="ltr"><strong>${esc(r.no)}</strong></td><td class="ltr">${esc(r.assetCode)}</td><td>${esc(r.description)}</td><td>${priorityBadge(r.priority)}</td><td>${statusBadge(r.status)}</td><td>${arDate(r.createdAt)}</td><td class="actions">${r.linkedWo?badge('WO '+r.linkedWo,'ok'):`<button class="small warn" onclick="convertRequest('${r.id}')">تحويل إلى WO</button>`}<button class="small" onclick="openRequestForm('${r.id}')">تعديل</button><button class="small danger" onclick="deleteRecord('requests','${r.id}')">حذف</button></td></tr>`));
+          }
+          function openRequestForm(id){
+            const r = id ? data.requests.find(x=>x.id===id) : {no:nextNo('WR',data.requests),assetCode:data.assets[0]?.code||'',requestedBy:'Operator',priority:'Medium',status:'Open',description:''};
+            openForm(id?'تعديل طلب':'طلب صيانة جديد', [
+              ['no','رقم الطلب','text',r.no,true],['assetCode','الأصل','select',r.assetCode,false,data.assets.map(a=>a.code)],['requestedBy','مقدم الطلب','text',r.requestedBy],['priority','الأولوية','select',r.priority,false,PRIORITY],['status','الحالة','select',r.status,false,['Open','Reviewed','Converted','Rejected']],['description','وصف المشكلة','textarea',r.description,true]
+            ], vals => { if(id) Object.assign(r, vals); else data.requests.push({...vals,id:uid('wr'),createdAt:nowISO(),linkedWo:''}); saveData(); closeModal(); renderRequests(); });
+          }
+          function convertRequest(id){
+            const r = data.requests.find(x=>x.id===id); if(!r) return;
+            const no = nextNo('WO', data.workorders);
+            data.workorders.push({id:uid('wo'), no, title:`From ${r.no} - ${r.assetCode}`, assetCode:r.assetCode, type:'Corrective', status:'Draft', priority:r.priority, assignedTo:'', plannedDate:today(), laborHours:0, materialCost:0, notes:r.description, parts:[], createdAt:nowISO(), closedAt:''});
+            r.status='Converted'; r.linkedWo=no; saveData(); toast('تم تحويل الطلب إلى أمر عمل'); renderRequests();
+          }
+          
+          function renderWorkorders(){
+            page('أوامر العمل', `<button class="primary" onclick="openWorkorderForm()">+ أمر عمل</button><button onclick="openIssueForm()">صرف مادة</button>`, renderTable('workorders', data.workorders, ['رقم WO','العنوان','الأصل','النوع','الحالة','الأولوية','الموعد','التكلفة','إجراء'], w => `
+              <tr><td class="ltr"><strong>${esc(w.no)}</strong></td><td>${esc(w.title)}</td><td class="ltr">${esc(w.assetCode)}</td><td>${esc(w.type)}</td><td>${statusBadge(w.status)}</td><td>${priorityBadge(w.priority)}</td><td>${arDate(w.plannedDate)}</td><td class="ltr">${money(w.materialCost)}</td><td class="actions"><button class="small" onclick="openWorkorderForm('${w.id}')">تعديل</button><button class="small warn" onclick="openIssueForm('${w.id}')">صرف مواد</button><button class="small" onclick="showWODetails('${w.id}')">تفاصيل</button><button class="small danger" onclick="deleteRecord('workorders','${w.id}')">حذف</button></td></tr>`));
+          }
+          function createWOForAsset(code){ openWorkorderForm('', code); }
+          function openWorkorderForm(id='', forcedAsset=''){
+            const w = id ? data.workorders.find(x=>x.id===id) : {no:nextNo('WO',data.workorders),title:'',assetCode:forcedAsset||data.assets[0]?.code||'',type:'Corrective',status:'Draft',priority:'Medium',assignedTo:'',plannedDate:today(),laborHours:0,materialCost:0,notes:''};
+            const asset = assetByCode(w.assetCode);
+            const warrantyAlert = asset && asset.warrantyUntil && new Date(asset.warrantyUntil)>=new Date() ? `<div class="alert">تنبيه: الأصل ${esc(asset.code)} تحت الضمان حتى ${esc(asset.warrantyUntil)}. راجع الضمان قبل تحميل تكلفة إصلاح داخلية.</div>` : '';
+            openForm(id?'تعديل أمر عمل':'أمر عمل جديد', [
+              ['no','رقم WO','text',w.no,true],['title','العنوان','text',w.title,true],['assetCode','الأصل','select',w.assetCode,false,data.assets.map(a=>a.code)],['type','النوع','select',w.type,false,['Corrective','Preventive','Inspection','Emergency']],['status','الحالة','select',w.status,false,WO_STATUS],['priority','الأولوية','select',w.priority,false,PRIORITY],['assignedTo','المسؤول','text',w.assignedTo],['plannedDate','تاريخ مخطط','date',w.plannedDate],['laborHours','ساعات العمل','number',w.laborHours],['notes','ملاحظات / تعليمات السلامة','textarea',w.notes]
+            ], vals => { vals.laborHours=num(vals.laborHours); if(vals.status==='Closed' && id) w.closedAt=nowISO(); if(id) Object.assign(w, vals); else data.workorders.push({...vals,id:uid('wo'),materialCost:0,parts:[],createdAt:nowISO(),closedAt:''}); saveData(); closeModal(); renderWorkorders(); }, warrantyAlert);
+          }
+          function showWODetails(id){
+            const w=woById(id); if(!w)return;
+            const parts = (w.parts||[]).map(p=>`<tr><td>${esc(p.itemCode)}</td><td>${esc(p.itemName)}</td><td>${esc(p.qty)}</td><td>${money(p.lineCost)}</td></tr>`).join('') || `<tr><td colspan="4" class="empty">لا توجد مواد مصروفة</td></tr>`;
+            openModal(`تفاصيل ${esc(w.no)}`, `<div class="grid two"><div class="alert ok"><b>الأصل:</b> ${esc(w.assetCode)}</div><div class="alert"><b>الحالة:</b> ${esc(w.status)}</div></div><p>${esc(w.notes)}</p><h3>المواد المصروفة</h3><table><thead><tr><th>الكود</th><th>المادة</th><th>الكمية</th><th>التكلفة</th></tr></thead><tbody>${parts}</tbody></table>`);
+          }
+          
+          function renderPM(){
+            page('الصيانة الوقائية', `<button class="primary" onclick="openPMForm()">+ برنامج PM</button>`, renderTable('pm', data.pm, ['الكود','البرنامج','الأصل','التكرار','عداد الاستحقاق','الحالة','إجراء'], p => `
+              <tr><td class="ltr"><strong>${esc(p.code)}</strong></td><td>${esc(p.name)}</td><td class="ltr">${esc(p.assetCode)}</td><td>${esc(p.frequency)}</td><td class="ltr">${esc(p.meterDue||0)}</td><td>${p.active?badge('Active','ok'):badge('Inactive','danger')}</td><td class="actions"><button class="small" onclick="openPMForm('${p.id}')">تعديل</button><button class="small warn" onclick="generatePMWO('${p.id}')">توليد WO</button><button class="small danger" onclick="deleteRecord('pm','${p.id}')">حذف</button></td></tr>`));
+          }
+          function openPMForm(id){
+            const p = id ? data.pm.find(x=>x.id===id) : {code:'PM-',name:'',assetCode:data.assets[0]?.code||'',frequency:'Monthly',meterDue:0,steps:'',active:true};
+            openForm(id?'تعديل PM':'برنامج PM جديد', [
+              ['code','الكود','text',p.code,true],['name','اسم البرنامج','text',p.name,true],['assetCode','الأصل','select',p.assetCode,false,data.assets.map(a=>a.code)],['frequency','التكرار','text',p.frequency],['meterDue','عداد الاستحقاق','number',p.meterDue],['active','الحالة','select',String(p.active),false,['true','false']],['steps','خطوات العمل','textarea',p.steps]
+            ], vals => { vals.meterDue=num(vals.meterDue); vals.active=vals.active==='true'; if(id) Object.assign(p,vals); else data.pm.push({...vals,id:uid('pm')}); saveData(); closeModal(); renderPM(); });
+          }
+          function generatePMWO(id){ const p=data.pm.find(x=>x.id===id); if(!p)return; data.workorders.push({id:uid('wo'), no:nextNo('WO',data.workorders), title:p.name, assetCode:p.assetCode, type:'Preventive', status:'Draft', priority:'Medium', assignedTo:'Maintenance Team', plannedDate:today(), laborHours:0, materialCost:0, notes:p.steps, parts:[], createdAt:nowISO(), closedAt:''}); saveData(); toast('تم توليد أمر عمل وقائي'); setPage('workorders'); }
+          
+          function renderInventory(){
+            page('المخزون وقطع الغيار', `<button class="primary" onclick="openInventoryForm()">+ مادة</button><button onclick="openReceiveForm()">استلام</button><button onclick="openIssueForm()">صرف على WO</button>`, renderTable('inventory', data.inventory, ['الكود','المادة','النوع','الوحدة','الرصيد','الحد الأدنى','التكلفة','إجراء'], i => `
+              <tr><td class="ltr"><strong>${esc(i.code)}</strong></td><td>${esc(i.name)} ${i.critical?badge('Critical','warn'):''}</td><td>${esc(i.type)}</td><td>${esc(i.uom)}</td><td class="ltr">${num(i.stock)<=num(i.min)?badge(i.stock,'danger'):badge(i.stock,'ok')}</td><td class="ltr">${esc(i.min)}</td><td class="ltr">${money(i.cost)}</td><td class="actions"><button class="small" onclick="openInventoryForm('${i.id}')">تعديل</button><button class="small warn" onclick="openIssueForm('', '${i.id}')">صرف</button><button class="small danger" onclick="deleteRecord('inventory','${i.id}')">حذف</button></td></tr>`));
+          }
+          function openInventoryForm(id){
+            const i=id?data.inventory.find(x=>x.id===id):{code:'',name:'',type:'Spare Part',uom:'pcs',stock:0,min:0,cost:0,critical:false,notes:''};
+            openForm(id?'تعديل مادة':'مادة جديدة', [
+              ['code','الكود','text',i.code,true],['name','اسم المادة','text',i.name,true],['type','النوع','select',i.type,false,['Spare Part','Lubricant','Consumable','Tool','Service']],['uom','الوحدة','text',i.uom],['stock','الرصيد الافتتاحي','number',i.stock],['min','الحد الأدنى','number',i.min],['cost','تكلفة الوحدة','number',i.cost],['critical','حرجة؟','select',String(i.critical),false,['true','false']],['notes','ملاحظات','textarea',i.notes]
+            ], vals => { vals.stock=num(vals.stock); vals.min=num(vals.min); vals.cost=num(vals.cost); vals.critical=vals.critical==='true'; if(id) Object.assign(i,vals); else data.inventory.push({...vals,id:uid('inv')}); saveData(); closeModal(); renderInventory(); });
+          }
+          function openReceiveForm(){
+            openForm('استلام مخزني', [['inventoryId','المادة','select',data.inventory[0]?.id||'',false,data.inventory.map(i=>[i.id,`${i.code} - ${i.name}`])],['qty','الكمية','number',1,true],['unitCost','تكلفة الوحدة','number',0],['note','ملاحظة','textarea','']], vals => {
+              const item=invById(vals.inventoryId); if(!item)return; const q=num(vals.qty); if(q<=0){toast('أدخل كمية صحيحة');return;} const cost = num(vals.unitCost)||num(item.cost); item.stock=num(item.stock)+q; item.cost=cost||item.cost; data.transactions.push({id:uid('tr'),type:'RECEIVE',itemId:item.id,itemCode:item.code,qty:q,unitCost:cost,woNo:'',note:vals.note,createdAt:nowISO()}); saveData(); closeModal(); renderInventory(); toast('تم الاستلام وتحديث الرصيد بحركة مخزنية');
+            });
+          }
+          function openIssueForm(woId='', itemId=''){
+            const openWOs = data.workorders.filter(w=>!['Closed','Cancelled'].includes(w.status));
+            if(openWOs.length===0){ toast('لا يوجد أمر عمل مفتوح للصرف عليه'); return; }
+            openForm('صرف مادة على أمر عمل', [['woId','أمر العمل','select',woId||openWOs[0].id,false,openWOs.map(w=>[w.id,`${w.no} - ${w.title}`])],['inventoryId','المادة','select',itemId||data.inventory[0]?.id||'',false,data.inventory.map(i=>[i.id,`${i.code} - ${i.name} | رصيد ${i.stock}`])],['qty','الكمية','number',1,true],['note','ملاحظة','textarea','']], vals => {
+              const w=woById(vals.woId); const item=invById(vals.inventoryId); const q=num(vals.qty);
+              if(!w || !item){toast('بيانات غير صحيحة');return;} if(q<=0){toast('أدخل كمية صحيحة');return;} if(q>num(item.stock)){toast('لا يوجد رصيد كافٍ. لا يمكن الصرف بدون توفر المادة.');return;}
+              const lineCost=q*num(item.cost); item.stock=num(item.stock)-q; if(!w.parts)w.parts=[]; w.parts.push({itemId:item.id,itemCode:item.code,itemName:item.name,qty:q,lineCost,note:vals.note,createdAt:nowISO()}); w.materialCost=num(w.materialCost)+lineCost;
+              data.transactions.push({id:uid('tr'),type:'ISSUE',itemId:item.id,itemCode:item.code,qty:q,unitCost:item.cost,woNo:w.no,note:vals.note,createdAt:nowISO()}); saveData(); closeModal(); render(); toast('تم صرف المادة على أمر العمل وتسجيل حركة مخزنية');
+            });
+          }
+          
+          function renderReports(){
+            const low = data.inventory.filter(i=>num(i.stock)<=num(i.min));
+            const due = data.assets.filter(a=>num(a.dueMeter)>0 && num(a.meter)>=num(a.dueMeter)-20);
+            const open = data.workorders.filter(w=>!['Closed','Cancelled'].includes(w.status));
+            const trans = [...data.transactions].slice(-20).reverse();
+            page('التقارير', `<button onclick="window.print()">طباعة</button>`, `
+              <div class="grid three mobile-two"><div class="card metric danger"><span>مخزون منخفض</span><strong>${low.length}</strong></div><div class="card metric warn"><span>PM قريب/مستحق</span><strong>${due.length}</strong></div><div class="card metric"><span>أوامر مفتوحة</span><strong>${open.length}</strong></div></div>
+              <div class="grid two mt">
+                <div class="card"><h3>Low Stock</h3><div class="list">${low.map(i=>`<div class="item"><strong>${esc(i.code)} - ${esc(i.name)}</strong><small>رصيد ${esc(i.stock)} / حد ${esc(i.min)}</small></div>`).join('')||'<div class="empty">لا يوجد</div>'}</div></div>
+                <div class="card"><h3>PM Due</h3><div class="list">${due.map(a=>`<div class="item"><strong>${esc(a.code)} - ${esc(a.name)}</strong><small>عداد ${esc(a.meter)} / استحقاق ${esc(a.dueMeter)}</small></div>`).join('')||'<div class="empty">لا يوجد</div>'}</div></div>
+              </div>
+              <div class="card table-card mt"><div class="table-tools"><strong>آخر الحركات المخزنية</strong></div><table><thead><tr><th>النوع</th><th>المادة</th><th>الكمية</th><th>WO</th><th>التاريخ</th></tr></thead><tbody>${trans.map(t=>`<tr><td>${esc(t.type)}</td><td>${esc(t.itemCode)}</td><td class="ltr">${esc(t.qty)}</td><td class="ltr">${esc(t.woNo||'-')}</td><td>${arDate(t.createdAt)}</td></tr>`).join('')||'<tr><td colspan="5" class="empty">لا توجد حركات</td></tr>'}</tbody></table></div>
+            `);
+          }
+          
+          function renderBackup(){
+            const json = JSON.stringify(data,null,2);
+            page('النسخ الاحتياطي والاستيراد', `<button class="primary" onclick="shareBackup()">مشاركة Backup</button>`, `
+              <div class="grid two">
+                <div class="card"><h3>تصدير البيانات</h3><p class="muted">احتفظ بنسخة JSON خارج الهاتف. هذه هي طريقة نقل البيانات بين الأجهزة بدون إنترنت.</p><textarea id="backupText" class="backup-box ltr">${esc(json)}</textarea><div class="actions mt"><button onclick="selectBackup()">تحديد النص</button><button class="primary" onclick="shareBackup()">مشاركة</button></div></div>
+                <div class="card"><h3>استيراد بيانات</h3><p class="muted">الصق ملف JSON هنا ثم اضغط استيراد. سيتم استبدال بيانات الجهاز الحالي.</p><textarea id="importText" class="backup-box ltr" placeholder="Paste backup JSON here"></textarea><button class="warn full mt" onclick="importBackup()">استيراد واستبدال البيانات</button></div>
+              </div>
+              <div class="alert mt">ملاحظة: هذه النسخة أوفلاين. لا يوجد مزامنة تلقائية بين أجهزة متعددة إلا إذا أضفنا لاحقًا قاعدة بيانات LAN داخلية.</div>
+            `);
+          }
+          function selectBackup(){ const t=$('#backupText'); t.focus(); t.select(); toast('تم تحديد النص'); }
+          function shareBackup(){ const json=JSON.stringify(data,null,2); try{ if(window.CMMSBridge){ CMMSBridge.shareBackup(json); return; } }catch(e){} const blob=new Blob([json],{type:'application/json'}); const a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download='cmms-offline-backup.json'; a.click(); }
+          function importBackup(){
+            const raw=$('#importText').value.trim(); if(!raw){toast('الصق بيانات النسخة الاحتياطية أولاً');return;}
+            try{ const parsed=JSON.parse(raw); if(!parsed.assets || !parsed.workorders || !parsed.inventory) throw new Error('Invalid CMMS backup'); if(confirm('سيتم استبدال كل البيانات الحالية. هل أنت متأكد؟')){ data=parsed; normalizeData(); saveData(); toast('تم الاستيراد'); setPage('dashboard'); } }catch(e){ toast('ملف JSON غير صحيح أو ليس نسخة CMMS'); }
+          }
+          
+          function renderSettings(){
+            page('الإعدادات', '', `
+              <div class="grid two">
+                <div class="card"><h3>معلومات النظام</h3><label>اسم الشركة</label><input id="company" value="${esc(data.settings.company)}"><label>الموقع / المصنع</label><input id="plant" value="${esc(data.settings.plant)}"><button class="primary mt" onclick="saveSettings()">حفظ</button></div>
+                <div class="card"><h3>رمز الدخول</h3><label>رمز جديد</label><input id="newPin" type="password" inputmode="numeric" placeholder="رمز جديد"><button class="warn mt" onclick="changePin()">تغيير الرمز</button><p class="muted">الرمز الافتراضي 1234. غيّره قبل استخدام التطبيق فعليًا.</p></div>
+                <div class="card"><h3>إعادة تهيئة</h3><p class="muted">استخدمها فقط عند بداية تشغيل جديدة.</p><div class="actions"><button class="warn" onclick="resetSample()">إرجاع بيانات تجريبية</button><button class="danger" onclick="clearAll()">مسح كل البيانات</button></div></div>
+                <div class="card"><h3>نوع النسخة</h3><div class="alert ok">Offline APK داخلي فقط. لا يوجد اتصال بأي خادم ولا يوجد صلاحية إنترنت في التطبيق.</div></div>
+              </div>
+            `);
+          }
+          function saveSettings(){ data.settings.company=$('#company').value.trim()||'Alhadi Group'; data.settings.plant=$('#plant').value.trim()||'Internal CMMS'; saveData(); toast('تم الحفظ'); }
+          function changePin(){ const p=$('#newPin').value.trim(); if(p.length<4){toast('الرمز يجب أن يكون 4 أرقام أو أكثر');return;} data.settings.pin=p; saveData(); toast('تم تغيير الرمز'); $('#newPin').value=''; }
+          function resetSample(){ if(confirm('سيتم استبدال البيانات الحالية بالبيانات التجريبية.')){ data=defaultData(); saveData(); setPage('dashboard'); } }
+          function clearAll(){ if(confirm('تحذير: سيتم مسح كل البيانات.')){ data=defaultData(); data.assets=[]; data.requests=[]; data.workorders=[]; data.pm=[]; data.inventory=[]; data.transactions=[]; saveData(); setPage('dashboard'); } }
+          
+          function openModal(title, html){ $('#modalTitle').textContent=title; $('#modalBody').innerHTML=html; $('#modal').classList.remove('hidden'); }
+          function closeModal(){ $('#modal').classList.add('hidden'); $('#modalBody').innerHTML=''; }
+          function openForm(title, fields, onSubmit, beforeHtml=''){
+            const html = `${beforeHtml}<form id="dynForm"><div class="form-grid">${fields.map(f=>fieldHtml(...f)).join('')}</div><div class="actions mt"><button type="submit" class="primary">حفظ</button><button type="button" onclick="closeModal()">إلغاء</button></div></form>`;
+            openModal(title, html);
+            $('#dynForm').addEventListener('submit', e => { e.preventDefault(); const vals={}; fields.forEach(f=>{ vals[f[0]] = $(`[name="${f[0]}"]`, $('#dynForm')).value; }); onSubmit(vals); });
+          }
+          function fieldHtml(name,label,type,value='',required=false,options=[]){
+            const req = required ? 'required' : '';
+            const cls = type==='textarea' ? 'span' : '';
+            if(type==='textarea') return `<div class="${cls}"><label>${esc(label)}</label><textarea name="${name}" ${req}>${esc(value)}</textarea></div>`;
+            if(type==='select'){
+              const opts = options.map(o => Array.isArray(o)?`<option value="${esc(o[0])}" ${String(o[0])===String(value)?'selected':''}>${esc(o[1])}</option>`:`<option value="${esc(o)}" ${String(o)===String(value)?'selected':''}>${esc(o)}</option>`).join('');
+              return `<div><label>${esc(label)}</label><select name="${name}" ${req}>${opts}</select></div>`;
+            }
+            return `<div><label>${esc(label)}</label><input name="${name}" type="${type}" value="${esc(value)}" ${req}></div>`;
+          }
+          
+          window.addEventListener('DOMContentLoaded', init);
+          CMMS_EOF_app_src_main_assets_www_app_js
+          cd "$PROJECT_DIR"
+          gradle :app:assembleDebug --stacktrace
+          cd ..
+          cp "$PROJECT_DIR/app/build/outputs/apk/debug/app-debug.apk" apk-output/Alhadi-CMMS-Offline.apk
+          ls -lah apk-output
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Alhadi-CMMS-Offline-debug-apk
+          path: apk-output/Alhadi-CMMS-Offline.apk
+          if-no-files-found: error
